@@ -1,0 +1,18 @@
+# Environment variables (should not be committed)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+usage.log
+*.log
+
+# Dependencies
+dist/
+lib/
+node_modules/
+
+# Other
+.DS_Store

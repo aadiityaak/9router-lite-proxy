@@ -1,0 +1,17 @@
+[Unit]
+Description=LITE Proxy — Restricted OpenAI-compatible endpoint
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/path/to/9router-lite-proxy
+Environment=LITE_TOKEN=sk-your-lite-proxy-token
+Environment=UPSTREAM_TOKEN=Bearer sk-your-9router-token
+ExecStart=/usr/bin/node proxy.js
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
