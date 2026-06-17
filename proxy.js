@@ -150,7 +150,7 @@ function serveDashboard(res) {
     </div>
   </nav>
 
-  <div class="container-fluid py-3 px-4">
+  <div class="container-fluid py-3 px-4" style="max-width:1400px;margin:0 auto">
     <!-- Stat Cards -->
     <div class="row g-3 mb-4" id="stats">
       <div class="col-md-3 col-6">
