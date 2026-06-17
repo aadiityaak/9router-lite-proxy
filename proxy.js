@@ -2,7 +2,7 @@
 /**
  * LITE Proxy — Restricted OpenAI-compatible endpoint
  * 
- * - Only accepts token: LITE_TOKEN_PLACEHOLDER
+ * - Only accepts token: (set via LITE_TOKEN env var)
  * - Forces model to "LITE" on every request
  * - Proxies to 9Router at http://127.0.0.1:20128
  * - Tracks usage in /home/ubuntu/lite-proxy/usage.log
