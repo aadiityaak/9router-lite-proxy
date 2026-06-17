@@ -7,6 +7,7 @@
  * - Proxies to 9Router at http://127.0.0.1:20128
  * - Tracks usage in /home/ubuntu/lite-proxy/usage.log
  * - Serves dashboard at /usage (with cookie-based login)
+ * - Real-time active request tracking + charts
  */
 
 const http = require('http');
@@ -51,7 +52,6 @@ function isAuthed(req) {
   const cookies = parseCookies(req.headers.cookie);
   const token = cookies.lite_sesh;
   if (!token || !sessions.has(token)) return false;
-  // Extend session on activity
   sessions.set(token, Date.now());
   return true;
 }
@@ -64,6 +64,10 @@ setInterval(() => {
   }
 }, 600000);
 
+// ─── Active Request Tracking ───────────────────────────────────
+let activeRequests = 0;
+let lastRequestAt = null;
+
 const HTML_HEAD = (title) => `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -72,12 +76,28 @@ const HTML_HEAD = (title) => `<!DOCTYPE html>
   <title>${title}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <style>
-    body { background:#f8f9fa }
-    .stat-card { border-left:4px solid #0d6efd }
-    .stat-card .num { font-size:2rem; font-weight:700 }
-    .table-wrap { max-height:400px; overflow-y:auto }
-    .bg-model { background:#e8f4f8; font-family:monospace; padding:2px 8px; border-radius:4px }
+    body { background: #f0f2f5; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    .stat-card { border: none; border-radius: 12px; transition: all .25s ease; cursor: default; }
+    .stat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+    .stat-card .num { font-size: 1.9rem; font-weight: 700; }
+    .stat-card .icon-circle { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; }
+    .table-wrap { max-height: 380px; overflow-y: auto; scrollbar-width: thin; }
+    .table-wrap::-webkit-scrollbar { width: 6px; }
+    .table-wrap::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+    .bg-model { background: #eef2ff; font-family: monospace; padding: 2px 8px; border-radius: 6px; font-size: .85em; }
+    .card { border: none; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.04); }
+    .card-header { background: transparent; border-bottom: 1px solid #eee; font-weight: 600; font-size: .9rem; }
+    .live-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+    .live-dot.active { background: #22c55e; animation: pulse-dot 1.5s ease-in-out infinite; }
+    .live-dot.idle { background: #94a3b8; }
+    @keyframes pulse-dot { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,.5); } 50% { box-shadow: 0 0 0 8px rgba(34,197,94,0); } }
+    @keyframes row-fade { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+    .row-new { animation: row-fade .4s ease-out; }
+    .navbar { backdrop-filter: blur(12px); background: rgba(15,23,42,.92) !important; }
+    .chart-container { position: relative; height: 200px; }
+    .badge-status { font-size: .75rem; font-weight: 500; padding: 3px 10px; }
   </style>
 </head>`;
 
@@ -85,113 +105,143 @@ const HTML_HEAD = (title) => `<!DOCTYPE html>
 
 function serveLogin(res, error) {
   const html = `${HTML_HEAD('Login — LITE Proxy')}
-<body class="d-flex align-items-center min-vh-100">
-  <div class="container" style="max-width:400px">
-    <div class="card shadow">
+<body class="d-flex align-items-center min-vh-100" style="background: linear-gradient(135deg,#0f172a 0,#1e293b 100%)">
+  <div class="container" style="max-width:420px">
+    <div class="card shadow-lg border-0 rounded-4">
       <div class="card-body p-4">
         <div class="text-center mb-4">
-          <i class="bi bi-shield-lock fs-1 text-primary"></i>
-          <h4 class="mt-2">LITE Proxy Dashboard</h4>
+          <div class="mx-auto mb-3 d-flex align-items-center justify-content-center" style="width:64px;height:64px;border-radius:16px;background:linear-gradient(135deg,#3b82f6,#8b5cf6)">
+            <i class="bi bi-lightning-charge-fill text-white fs-3"></i>
+          </div>
+          <h5 class="fw-bold">LITE Proxy Dashboard</h5>
           <p class="text-muted small">Masukkan password untuk melanjutkan</p>
         </div>
-        ${error ? `<div class="alert alert-danger py-2 small">${error}</div>` : ''}
+        ${error ? `<div class="alert alert-danger py-2 small rounded-3"><i class="bi bi-exclamation-circle me-1"></i>${error}</div>` : ''}
         <form method="POST" action="/login">
-          <div class="mb-3">
-            <label class="form-label">Password</label>
-            <input type="password" name="password" class="form-control" autofocus required>
+          <div class="mb-4">
+            <input type="password" name="password" class="form-control form-control-lg rounded-3" placeholder="Password" autofocus required>
           </div>
-          <button type="submit" class="btn btn-primary w-100">Masuk</button>
+          <button type="submit" class="btn btn-primary w-100 py-2 rounded-3 fw-semibold">Masuk</button>
         </form>
       </div>
     </div>
-    <p class="text-center text-muted small mt-3">LITE Proxy &mdash; lite.wsd.my.id</p>
+    <p class="text-center text-secondary small mt-4 opacity-75">LITE Proxy &mdash; lite.wsd.my.id</p>
   </div>
 </body></html>`;
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(html);
 }
 
-// ─── Dashboard HTML (Bootstrap 5) ───────────────────────────────
+// ─── Dashboard HTML (Bootstrap 5 + Chart.js) ────────────────────
 
 function serveDashboard(res) {
   const html = `${HTML_HEAD('Dashboard — LITE Proxy')}
 <body>
-  <nav class="navbar navbar-dark bg-dark px-3">
-    <span class="navbar-brand mb-0 h1"><i class="bi bi-lightning-charge-fill text-warning"></i> LITE Proxy</span>
-    <div>
-      <span class="text-light me-3 small"><code class="text-light bg-secondary px-2 py-1 rounded">lite.wsd.my.id/v1</code></span>
-      <a href="/logout" class="btn btn-outline-light btn-sm"><i class="bi bi-box-arrow-right"></i> Logout</a>
+  <nav class="navbar navbar-dark px-3 py-2 shadow-sm">
+    <div class="d-flex align-items-center gap-3">
+      <span class="navbar-brand mb-0 fw-bold"><i class="bi bi-lightning-charge-fill text-warning me-1"></i> LITE Proxy</span>
+      <span id="live-badge" class="badge bg-secondary rounded-pill small px-3 py-1">
+        <span class="live-dot idle" id="live-dot"></span><span id="live-text">Idle</span>
+      </span>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+      <span class="text-light-emphasis small d-none d-md-inline"><code class="text-light bg-dark bg-opacity-25 px-2 py-1 rounded">lite.wsd.my.id/v1</code></span>
+      <a href="/logout" class="btn btn-outline-light btn-sm rounded-3"><i class="bi bi-box-arrow-right me-1"></i>Logout</a>
     </div>
   </nav>
 
   <div class="container-fluid py-3 px-4">
-    <!-- Stat cards -->
+    <!-- Stat Cards -->
     <div class="row g-3 mb-4" id="stats">
       <div class="col-md-3 col-6">
-        <div class="card stat-card h-100">
-          <div class="card-body">
-            <div class="num" id="total-req">—</div>
-            <div class="text-muted small">Total Requests</div>
+        <div class="card stat-card h-100 p-3">
+          <div class="d-flex align-items-start gap-3">
+            <div class="icon-circle" style="background:#eff6ff;color:#3b82f6"><i class="bi bi-arrow-up-short"></i></div>
+            <div><div class="num" id="total-req">—</div><div class="text-muted small">Total Requests</div></div>
           </div>
         </div>
       </div>
       <div class="col-md-3 col-6">
-        <div class="card stat-card h-100" style="border-left-color:#198754">
-          <div class="card-body">
-            <div class="num text-success" id="today-req">—</div>
-            <div class="text-muted small">Today</div>
+        <div class="card stat-card h-100 p-3">
+          <div class="d-flex align-items-start gap-3">
+            <div class="icon-circle" style="background:#f0fdf4;color:#22c55e"><i class="bi bi-calendar-check"></i></div>
+            <div><div class="num text-success" id="today-req">—</div><div class="text-muted small">Today</div></div>
           </div>
         </div>
       </div>
       <div class="col-md-3 col-6">
-        <div class="card stat-card h-100" style="border-left-color:#6f42c1">
-          <div class="card-body">
-            <div class="num text-primary" id="total-in">—</div>
-            <div class="text-muted small">Tokens In</div>
+        <div class="card stat-card h-100 p-3">
+          <div class="d-flex align-items-start gap-3">
+            <div class="icon-circle" style="background:#faf5ff;color:#a855f7"><i class="bi bi-input-cursor-text"></i></div>
+            <div><div class="num" style="color:#a855f7" id="total-in">—</div><div class="text-muted small">Tokens In</div></div>
           </div>
         </div>
       </div>
       <div class="col-md-3 col-6">
-        <div class="card stat-card h-100" style="border-left-color:#fd7e14">
-          <div class="card-body">
-            <div class="num text-warning" id="total-out">—</div>
-            <div class="text-muted small">Tokens Out</div>
+        <div class="card stat-card h-100 p-3">
+          <div class="d-flex align-items-start gap-3">
+            <div class="icon-circle" style="background:#fff7ed;color:#f97316"><i class="bi bi-chat-dots"></i></div>
+            <div><div class="num" style="color:#f97316" id="total-out">—</div><div class="text-muted small">Tokens Out</div></div>
           </div>
         </div>
       </div>
     </div>
 
+    <!-- Charts Row -->
+    <div class="row g-3 mb-4">
+      <div class="col-md-7">
+        <div class="card p-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="fw-semibold small"><i class="bi bi-graph-up me-1 text-primary"></i>Request Timeline (30m)</span>
+            <span class="badge bg-light text-muted small" id="total-chart">0 requests</span>
+          </div>
+          <div class="chart-container">
+            <canvas id="timelineChart"></canvas>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-5">
+        <div class="card p-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="fw-semibold small"><i class="bi bi-pie-chart me-1 text-primary"></i>Model Distribution</span>
+            <span class="badge bg-light text-muted small" id="model-count-chart">0 models</span>
+          </div>
+          <div class="chart-container d-flex align-items-center justify-content-center">
+            <canvas id="modelChart" style="max-width:220px;max-height:190px"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tables Row -->
     <div class="row g-3">
-      <!-- Models -->
       <div class="col-md-5">
         <div class="card">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <span><i class="bi bi-boxes"></i> By Model</span>
+            <span><i class="bi bi-boxes me-1"></i>By Model</span>
             <span class="badge bg-primary rounded-pill" id="model-count">0</span>
           </div>
           <div class="card-body p-0 table-wrap">
-            <table class="table table-sm table-hover mb-0">
-              <thead class="table-light"><tr><th>Model</th><th class="text-end">Req</th><th class="text-end">Tokens In</th><th class="text-end">Tokens Out</th></tr></thead>
-              <tbody id="model-rows"><tr><td colspan="4" class="text-center text-muted small py-3">Loading...</td></tr></tbody>
+            <table class="table table-sm table-hover mb-0 align-middle">
+              <thead class="table-light"><tr><th class="ps-3">Model</th><th class="text-end">Req</th><th class="text-end">Tokens In</th><th class="text-end pe-3">Tokens Out</th></tr></thead>
+              <tbody id="model-rows"><tr><td colspan="4" class="text-center text-muted small py-4">Loading...</td></tr></tbody>
             </table>
           </div>
         </div>
       </div>
-
-      <!-- Recent -->
       <div class="col-md-7">
         <div class="card">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <span><i class="bi bi-clock-history"></i> Recent</span>
-            <div>
-              <button class="btn btn-sm btn-outline-secondary me-1" onclick="window.location.reload()"><i class="bi bi-arrow-clockwise"></i></button>
-              <button class="btn btn-sm btn-outline-danger" onclick="clearLog()"><i class="bi bi-trash3"></i></button>
+            <span><i class="bi bi-clock-history me-1"></i>Recent Requests</span>
+            <div class="d-flex gap-1">
+              <button class="btn btn-sm btn-outline-secondary rounded-3" onclick="window.location.reload()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+              <button class="btn btn-sm btn-outline-danger rounded-3" onclick="clearLog()" title="Clear All Logs"><i class="bi bi-trash3"></i></button>
             </div>
           </div>
           <div class="card-body p-0 table-wrap">
-            <table class="table table-sm table-hover mb-0">
-              <thead class="table-light"><tr><th>Time</th><th>Requested → Forced</th><th class="text-end">Tokens</th><th class="text-center">Status</th><th class="text-end">Duration</th></tr></thead>
-              <tbody id="recent-rows"><tr><td colspan="5" class="text-center text-muted small py-3">Loading...</td></tr></tbody>
+            <table class="table table-sm table-hover mb-0 align-middle">
+              <thead class="table-light"><tr><th class="ps-3">Time</th><th>Requested → Forced</th><th class="text-end">Tokens</th><th class="text-center">Status</th><th class="text-end pe-3">Duration</th></tr></thead>
+              <tbody id="recent-rows"><tr><td colspan="5" class="text-center text-muted small py-4">Loading...</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -200,39 +250,169 @@ function serveDashboard(res) {
   </div>
 
 <script>
+// ── Charts ──
+let timelineChart, modelChart;
+const TL_LABELS = [], TL_DATA = [];
+
+function initCharts() {
+  const ctx = document.getElementById('timelineChart').getContext('2d');
+  timelineChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: TL_LABELS, datasets: [{
+      label: 'Requests',
+      data: TL_DATA,
+      borderColor: '#3b82f6',
+      backgroundColor: 'rgba(59,130,246,.08)',
+      fill: true,
+      tension: .35,
+      pointRadius: 3,
+      pointHoverRadius: 6,
+      borderWidth: 2,
+    }]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#cbd5e1', cornerRadius: 8, padding: 10 } },
+      scales: {
+        x: { grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 10 }, color: '#94a3b8' } },
+        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,.04)' }, ticks: { stepSize: 1, font: { size: 10 }, color: '#94a3b8' } }
+      },
+      animation: { duration: 600, easing: 'easeOutQuart' }
+    }
+  });
+
+  const mctx = document.getElementById('modelChart').getContext('2d');
+  modelChart = new Chart(mctx, {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: ['#3b82f6','#a855f7','#f97316','#22c55e','#ef4444','#06b6d4','#eab308'], borderWidth: 0 }] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '70%',
+      plugins: {
+        legend: { position: 'bottom', labels: { boxWidth: 10, padding: 8, font: { size: 10 }, color: '#64748b' } },
+        tooltip: { backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#cbd5e1', cornerRadius: 8, padding: 10 }
+      },
+      animation: { animateRotate: true, duration: 800 }
+    }
+  });
+}
+
+function updateChart(timeline) {
+  if (!timelineChart) return;
+  TL_LABELS.length = 0; TL_DATA.length = 0;
+  (timeline||[]).forEach(p => { TL_LABELS.push(p.time); TL_DATA.push(p.requests); });
+  timelineChart.update('default');
+  const total = TL_DATA.reduce((a,b)=>a+b, 0);
+  document.getElementById('total-chart').textContent = total + ' requests';
+}
+
+function updateModelChart(models) {
+  if (!modelChart || !models) return;
+  const labels = models.map(m => m.model);
+  const data = models.map(m => m.requests);
+  document.getElementById('model-count-chart').textContent = labels.length + ' model' + (labels.length!==1?'s':'');
+  if (labels.length === 0) {
+    modelChart.data.labels = ['No data']; modelChart.data.datasets[0].data = [1];
+    modelChart.data.datasets[0].backgroundColor = ['#e2e8f0'];
+  } else {
+    modelChart.data.labels = labels; modelChart.data.datasets[0].data = data;
+  }
+  modelChart.update('default');
+}
+
+// ── Animate counter ──
+function animateNum(el, target, duration=500) {
+  const start = parseInt(el.textContent.replace(/[^0-9]/g,''))||0;
+  if (start === target) return;
+  const diff = target - start, startTime = performance.now();
+  const step = (now) => {
+    const p = Math.min((now-startTime)/duration, 1);
+    el.textContent = Math.round(start + diff * this.easeOutCubic(p));
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+function easeOutCubic(t) { return 1 - Math.pow(1-t, 3); }
+
+// ── Live status ──
+function updateLive(active) {
+  const dot = document.getElementById('live-dot');
+  const text = document.getElementById('live-text');
+  const badge = document.getElementById('live-badge');
+  if (active > 0) {
+    dot.className = 'live-dot active';
+    text.textContent = active + ' active';
+    badge.className = 'badge bg-success rounded-pill small px-3 py-1';
+  } else {
+    dot.className = 'live-dot idle';
+    text.textContent = 'Idle';
+    badge.className = 'badge bg-secondary rounded-pill small px-3 py-1';
+  }
+}
+
+// ── Main load ──
+let prevRecent = [];
+
 async function load() {
   try {
-    const [s, m, r] = await Promise.all([
+    const [s, m, r, t, q] = await Promise.all([
       fetch('/usage/api/stats').then(r=>r.json()),
       fetch('/usage/api/models').then(r=>r.json()),
-      fetch('/usage/api/recent').then(r=>r.json())
+      fetch('/usage/api/recent').then(r=>r.json()),
+      fetch('/usage/api/timeline').then(r=>r.json()),
+      fetch('/usage/api/status').then(r=>r.json()),
     ]);
-    document.getElementById('total-req').textContent=s.total_requests;
-    document.getElementById('today-req').textContent=s.today_requests;
-    document.getElementById('total-in').textContent=s.total_tokens_in;
-    document.getElementById('total-out').textContent=s.total_tokens_out;
+
+    // Stats
+    animateNum.call({easeOutCubic}, document.getElementById('total-req'), s.total_requests);
+    animateNum.call({easeOutCubic}, document.getElementById('today-req'), s.today_requests);
+    document.getElementById('total-in').textContent = s.total_tokens_in;
+    document.getElementById('total-out').textContent = s.total_tokens_out;
+
+    // Live
+    updateLive(q.active);
+
+    // Charts
+    updateChart(t);
+    updateModelChart(m);
+
+    // Model table
+    const mc = document.getElementById('model-count');
     const mRows = document.getElementById('model-rows');
     if (m && m.length) {
-      document.getElementById('model-count').textContent=m.length;
-      mRows.innerHTML=m.map(x=>'<tr><td><span class="bg-model">'+x.model+'</span></td><td class="text-end">'+x.requests+'</td><td class="text-end">'+x.tokens_in+'</td><td class="text-end">'+x.tokens_out+'</td></tr>').join('');
+      mc.textContent = m.length;
+      mRows.innerHTML = m.map(x => '<tr><td class="ps-3"><span class="bg-model">'+x.model+'</span></td><td class="text-end fw-medium">'+x.requests+'</td><td class="text-end">'+x.tokens_in+'</td><td class="text-end pe-3">'+x.tokens_out+'</td></tr>').join('');
     } else {
-      mRows.innerHTML='<tr><td colspan="4" class="text-center text-muted small py-3">No data</td></tr>';
+      mc.textContent = '0';
+      mRows.innerHTML = '<tr><td colspan="4" class="text-center text-muted small py-4">No data</td></tr>';
     }
+
+    // Recent table
     const rRows = document.getElementById('recent-rows');
     if (r && r.length) {
-      rRows.innerHTML=r.map(x=>{
-        const ts=new Date(x.timestamp).toLocaleString();
-        const reqM=x.requested_model||'—';
-        const cls=x.status>=200&&x.status<300?'text-success':'text-danger';
-        return '<tr><td class="small">'+ts+'</td><td><span class="bg-model">'+reqM+'</span> &rarr; <span class="bg-model">LITE</span></td><td class="text-end">'+(x.tokens_in||0)+' / '+(x.tokens_out||0)+'</td><td class="text-center"><span class="badge bg-'+cls+'">'+x.status+'</span></td><td class="text-end text-muted small">'+(x.duration_ms||0)+'ms</td></tr>'
+      rRows.innerHTML = r.map((x,i) => {
+        const ts = new Date(x.timestamp).toLocaleString();
+        const reqM = x.requested_model || '—';
+        const isNew = i === 0 && (!prevRecent.length || x.timestamp !== prevRecent[0]?.timestamp);
+        const anim = isNew ? 'row-new' : '';
+        const stCls = x.status >= 200 && x.status < 300 ? 'bg-success' : 'bg-danger';
+        return '<tr class="'+anim+'"><td class="ps-3 small text-nowrap">'+ts+'</td><td><span class="bg-model">'+reqM+'</span> <span class="text-muted">&rarr;</span> <span class="bg-model">LITE</span></td><td class="text-end">'+(x.tokens_in||0)+' / '+(x.tokens_out||0)+'</td><td class="text-center"><span class="badge badge-status '+stCls+'">'+x.status+'</span></td><td class="text-end pe-3 text-muted small">'+(x.duration_ms||0)+'ms</td></tr>';
       }).join('');
+      prevRecent = r.slice(0,1);
     } else {
-      rRows.innerHTML='<tr><td colspan="5" class="text-center text-muted small py-3">No data</td></tr>';
+      rRows.innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-4">No data</td></tr>';
+      prevRecent = [];
     }
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
-load();
-setInterval(load,15000);
+
+// ── Init ──
+document.addEventListener('DOMContentLoaded', ()=>{
+  initCharts();
+  load();
+  setInterval(load, 5000); // fast poll for live feel
+});
 
 async function clearLog() {
   if (!confirm('Yakin mau clear semua log usage?')) return;
@@ -253,6 +433,44 @@ async function clearLog() {
 
 function handleAPI(method, url, res) {
   const p = url.pathname;
+
+  // Status (live active requests)
+  if (p === '/usage/api/status' && method === 'GET') {
+    return sendJson(res, 200, { active: activeRequests, lastAt: lastRequestAt });
+  }
+
+  // Timeline (requests per minute for last 30 min)
+  if (p === '/usage/api/timeline' && method === 'GET') {
+    try {
+      const raw = fs.readFileSync(LOG_FILE, 'utf8');
+      const lines = raw.split('\n').filter(l => l.trim());
+      const now = Date.now();
+      const cutoff = now - 30 * 60 * 1000;
+      const buckets = {};
+      for (let i = 0; i < 30; i++) {
+        const t = new Date(cutoff + i * 60000);
+        buckets[t.toISOString().substring(0, 16)] = 0; // YYYY-MM-DDTHH:mm
+      }
+      lines.forEach(l => {
+        try {
+          const e = JSON.parse(l);
+          const ts = new Date(e.timestamp).getTime();
+          if (ts >= cutoff) {
+            const key = new Date(e.timestamp).toISOString().substring(0, 16);
+            if (buckets[key] !== undefined) buckets[key]++;
+          }
+        } catch(e2) {}
+      });
+      const data = Object.entries(buckets).map(([time, count]) => ({
+        time: time.substring(11), // HH:mm
+        requests: count
+      }));
+      sendJson(res, 200, data);
+    } catch (e) {
+      sendJson(res, 200, []);
+    }
+    return;
+  }
 
   if (p === '/usage/api/stats' && method === 'GET') {
     try {
@@ -368,16 +586,13 @@ const server = http.createServer((req, res) => {
 
   // ─── Route: Login page ───
   if (path === '/login') {
-    if (method === 'GET') {
-      return serveLogin(res);
-    }
+    if (method === 'GET') return serveLogin(res);
     if (method === 'POST') {
       let body = '';
       req.on('data', c => body += c);
       req.on('end', () => {
         const params = new URLSearchParams(body);
-        const pass = params.get('password');
-        if (pass === DASHBOARD_PASS) {
+        if (params.get('password') === DASHBOARD_PASS) {
           const token = createSession();
           setSessionCookie(res, token);
           res.writeHead(302, { Location: '/usage' });
@@ -392,26 +607,20 @@ const server = http.createServer((req, res) => {
   // ─── Route: Logout ───
   if (path === '/logout') {
     const cookies = parseCookies(req.headers.cookie);
-    const token = cookies.lite_sesh;
-    if (token) sessions.delete(token);
+    if (cookies.lite_sesh) sessions.delete(cookies.lite_sesh);
     res.writeHead(302, { Location: '/login' });
     return res.end();
   }
 
   // ─── Route: Dashboard (authed) ───
   if (path === '/usage' || path === '/usage/') {
-    if (!isAuthed(req)) {
-      res.writeHead(302, { Location: '/login' });
-      return res.end();
-    }
+    if (!isAuthed(req)) { res.writeHead(302, { Location: '/login' }); return res.end(); }
     return serveDashboard(res);
   }
 
   // ─── Route: Dashboard API (authed) ───
   if (path.startsWith('/usage/api/')) {
-    if (!isAuthed(req)) {
-      return sendJson(res, 401, { error: 'Unauthorized' });
-    }
+    if (!isAuthed(req)) return sendJson(res, 401, { error: 'Unauthorized' });
     return handleAPI(method, url, res);
   }
 
@@ -426,8 +635,14 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 401, { error: 'Unauthorized. Invalid or missing API key.' });
   }
 
-  // ─── Track timing ───
+  // ─── Track active request ───
+  activeRequests++;
   const startTime = Date.now();
+  const cleanup = (tokens) => {
+    activeRequests--;
+    lastRequestAt = Date.now();
+    logUsage(tokens);
+  };
 
   // ─── Upstream options ───
   const options = {
@@ -452,9 +667,10 @@ const server = http.createServer((req, res) => {
       try {
         reqData = JSON.parse(body);
       } catch (e) {
+        activeRequests--;
         return sendJson(res, 400, { error: 'Invalid JSON', message: e.message });
       }
-      
+
       const requestedModel = reqData.model || 'unknown';
       reqData.model = FORCED_MODEL;
       const newBody = JSON.stringify(reqData);
@@ -468,30 +684,17 @@ const server = http.createServer((req, res) => {
           let tokensIn = 0, tokensOut = 0;
           try {
             const resp = JSON.parse(responseBody);
-            if (resp.usage) {
-              tokensIn = resp.usage.prompt_tokens || 0;
-              tokensOut = resp.usage.completion_tokens || 0;
-            }
+            if (resp.usage) { tokensIn = resp.usage.prompt_tokens || 0; tokensOut = resp.usage.completion_tokens || 0; }
           } catch(e) {}
-          
-          logUsage({
-            timestamp: new Date().toISOString(),
-            model: FORCED_MODEL,
-            requested_model: requestedModel,
-            tokens_in: tokensIn,
-            tokens_out: tokensOut,
-            status: upstreamRes.statusCode,
-            duration_ms: duration,
-          });
+          cleanup({ timestamp: new Date().toISOString(), model: FORCED_MODEL, requested_model: requestedModel, tokens_in: tokensIn, tokens_out: tokensOut, status: upstreamRes.statusCode, duration_ms: duration });
         });
-
         res.writeHead(upstreamRes.statusCode, cleanHeaders(upstreamRes.headers));
         upstreamRes.pipe(res);
       });
 
       upstreamReq.on('error', err => {
         const duration = Date.now() - startTime;
-        logUsage({ timestamp: new Date().toISOString(), model: FORCED_MODEL, requested_model: requestedModel, tokens_in: 0, tokens_out: 0, status: 502, duration_ms: duration });
+        cleanup({ timestamp: new Date().toISOString(), model: FORCED_MODEL, requested_model: requestedModel, tokens_in: 0, tokens_out: 0, status: 502, duration_ms: duration });
         sendJson(res, 502, { error: 'Bad Gateway', message: err.message });
       });
 
@@ -506,16 +709,19 @@ const server = http.createServer((req, res) => {
       let body = '';
       upstreamRes.on('data', c => body += c);
       upstreamRes.on('end', () => {
+        const duration = Date.now() - startTime;
         const filtered = filterModelsOnly(body);
         const headers = cleanHeaders(upstreamRes.headers);
         delete headers['content-length'];
         delete headers['transfer-encoding'];
         headers['content-length'] = Buffer.byteLength(filtered);
+        // Log this as a models list request (no token usage)
+        cleanup({ timestamp: new Date().toISOString(), model: FORCED_MODEL, tokens_in: 0, tokens_out: 0, status: upstreamRes.statusCode, duration_ms: duration });
         res.writeHead(upstreamRes.statusCode, headers);
         res.end(filtered);
       });
     });
-    upstreamReq.on('error', err => sendJson(res, 502, { error: 'Bad Gateway', message: err.message }));
+    upstreamReq.on('error', err => { activeRequests--; sendJson(res, 502, { error: 'Bad Gateway', message: err.message }); });
     upstreamReq.end();
     return;
   }
@@ -524,7 +730,7 @@ const server = http.createServer((req, res) => {
   const upstreamReq = http.request(options, upstreamRes => {
     let responseBody = '';
     const isStreaming = (upstreamRes.headers['content-type'] || '').includes('text/event-stream');
-    
+
     if (!isStreaming) {
       upstreamRes.on('data', c => responseBody += c);
       upstreamRes.on('end', () => {
@@ -532,19 +738,14 @@ const server = http.createServer((req, res) => {
         let tokensIn = 0, tokensOut = 0;
         try {
           const resp = JSON.parse(responseBody);
-          if (resp.usage) {
-            tokensIn = resp.usage.prompt_tokens || 0;
-            tokensOut = resp.usage.completion_tokens || 0;
-          }
+          if (resp.usage) { tokensIn = resp.usage.prompt_tokens || 0; tokensOut = resp.usage.completion_tokens || 0; }
         } catch(e) {}
-        logUsage({
-          timestamp: new Date().toISOString(),
-          model: FORCED_MODEL,
-          tokens_in: tokensIn,
-          tokens_out: tokensOut,
-          status: upstreamRes.statusCode,
-          duration_ms: duration,
-        });
+        cleanup({ timestamp: new Date().toISOString(), model: FORCED_MODEL, tokens_in: tokensIn, tokens_out: tokensOut, status: upstreamRes.statusCode, duration_ms: duration });
+      });
+    } else {
+      // For streaming: cleanup when response ends
+      upstreamRes.on('end', () => {
+        cleanup({ timestamp: new Date().toISOString(), model: FORCED_MODEL, tokens_in: 0, tokens_out: 0, status: upstreamRes.statusCode, duration_ms: Date.now() - startTime });
       });
     }
 
@@ -552,8 +753,8 @@ const server = http.createServer((req, res) => {
     upstreamRes.pipe(res);
   });
 
-  upstreamReq.on('error', err => sendJson(res, 502, { error: 'Bad Gateway', message: err.message }));
-  
+  upstreamReq.on('error', err => { activeRequests--; sendJson(res, 502, { error: 'Bad Gateway', message: err.message }); });
+
   if (method !== 'GET' && method !== 'HEAD') {
     req.pipe(upstreamReq);
   } else {
