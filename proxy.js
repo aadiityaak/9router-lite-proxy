@@ -146,6 +146,7 @@ function serveDashboard(res) {
     </div>
     <div class="d-flex align-items-center gap-2">
       <span class="text-light-emphasis small d-none d-md-inline"><code class="text-light bg-dark bg-opacity-25 px-2 py-1 rounded">lite.wsd.my.id/v1</code></span>
+      <a href="/docs" class="btn btn-outline-light btn-sm rounded-3 me-1"><i class="bi bi-book me-1"></i>Docs</a>
       <a href="/logout" class="btn btn-outline-light btn-sm rounded-3"><i class="bi bi-box-arrow-right me-1"></i>Logout</a>
     </div>
   </nav>
@@ -429,6 +430,134 @@ async function clearLog() {
   res.end(html);
 }
 
+// ─── Documentation Page ────────────────────────────────────────────
+
+function serveDocs(res) {
+  const html = `${HTML_HEAD('Docs — LITE Proxy')}
+<body>
+  <nav class="navbar navbar-dark px-3 py-2 shadow-sm">
+    <span class="navbar-brand mb-0 fw-bold"><i class="bi bi-lightning-charge-fill text-warning me-1"></i> LITE Proxy</span>
+    <a href="/docs" class="btn btn-outline-light btn-sm rounded-3"><i class="bi bi-book me-1"></i>Docs</a>
+    <a href="/logout" class="btn btn-outline-light btn-sm rounded-3"><i class="bi bi-box-arrow-right me-1"></i>Logout</a>
+  </nav>
+
+  <div class="container py-4" style="max-width: 900px;">
+    <h1 class="mb-2"><i class="bi bi-book-half me-2"></i>LITE Proxy — API Documentation</h1>
+    <p class="text-muted mb-4">Documentation for the restricted LITE proxy endpoint at <code>lite.wsd.my.id/v1</code>. This endpoint forces all requests to use the <strong>LITE</strong> model.</p>
+
+    <div class="card mb-4">
+      <div class="card-header"><h5 class="mb-0"><i class="bi bi-link-45deg me-2"></i>Endpoint URLs</h5></div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-sm table-hover">
+            <thead>
+              <tr>
+                <th style="width:30%">Path</th>
+                <th>Description</th>
+                <th>Auth Required</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>/v1/chat/completions</code></td>
+                <td>Standard OpenAI Chat Completions API. All requests are forced to use the LITE model.</td>
+                <td><span class="badge bg-primary">Bearer Token</span></td>
+              </tr>
+              <tr>
+                <td><code>/v1/models</code></td>
+                <td>List available models. Only shows the <strong>LITE</strong> model (forced)</td>
+                <td><span class="badge bg-primary">Bearer Token</span></td>
+              </tr>
+              <tr>
+                <td><code>/v1/embeddings</code></td>
+                <td>Text embeddings API (forced to LITE model)</td>
+                <td><span class="badge bg-primary">Bearer Token</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><h5 class="mb-0"><i class="bi bi-key me-2"></i>Authentication</h5></div>
+      <div class="card-body">
+        <p>All requests to <code>/v1/*</code> endpoints must include an <strong>Authorization</strong> header:</p>
+        <div class="bg-light p-3 rounded border">
+          <code>Authorization: Bearer sk-e654a4de10dd8e99-kbbqzf-f2d8eb26</code>
+        </div>
+        <p class="mt-3 mb-0"><strong>Note:</strong> The token <code>sk-e654a4de10dd8e99-kbbqzf-f2d8eb26</code> is set via the <code>LITE_TOKEN</code> environment variable on the proxy server.</p>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><h5 class="mb-0"><i class="bi bi-shuffle me-2"></i>Model Forcing</h5></div>
+      <div class="card-body">
+        <p><strong>Important:</strong> Every request to any <code>/v1/*</code> endpoint is **automatically forced** to use the <strong>LITE</strong> model, regardless of what <code>model</code> field you send in the request.</p>
+        <p>Examples of requests that get forced to <strong>LITE</strong>:</p>
+        <ul>
+          <li><code>{ "model": "gpt-4", ... }</code> → becomes <code>{ "model": "LITE", ... }</code></li>
+          <li><code>{ "model": "claude-3", ... }</code> → becomes <code>{ "model": "LITE", ... }</code></li>
+          <li><code>{ "model": "gemini-pro", ... }</code> → becomes <code>{ "model": "LITE", ... }</code></li>
+        </ul>
+        <p class="mb-0"><strong>The only model shown in <code>/v1/models</code> is <code>LITE</code> — no other models are exposed.</strong></p>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><h5 class="mb-0"><i class="bi bi-terminal-fill me-2"></i>API Examples</h5></div>
+      <div class="card-body">
+        <h6 class="fw-semibold">cURL</h6>
+        <div class="bg-dark text-light p-3 rounded">
+curl -X POST https://lite.wsd.my.id/v1/chat/completions \
+  -H "Authorization: Bearer sk-e654a4de10dd8e99-kbbqzf-f2d8eb26" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}'
+        </div>
+
+        <h6 class="fw-semibold mt-4">Python</h6>
+        <div class="bg-dark text-light p-3 rounded">
+import requests
+url = "https://lite.wsd.my.id/v1/chat/completions"
+headers = {"Authorization": "Bearer sk-e654a4de10dd8e99-kbbqzf-f2d8eb26", "Content-Type": "application/json"}
+data = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}
+response = requests.post(url, headers=headers, json=data)
+print(response.json())
+        </div>
+
+        <h6 class="fw-semibold mt-4">JavaScript (fetch)</h6>
+        <div class="bg-dark text-light p-3 rounded small font-monospace">
+fetch('https://lite.wsd.my.id/v1/chat/completions', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer sk-e654a4de10dd8e99-kbbqzf-f2d8eb26',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    model: 'gpt-4',
+    messages: [{ role: 'user', content: 'Hello!' }]
+  })
+})
+.then(response => response.json())
+.then(data => console.log(data))
+.catch(error => console.error(error));
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Dashboard & Monitoring</h5></div>
+      <div class="card-body">
+        <p>Access the usage dashboard and statistics at: <strong><a href="/usage">https://lite.wsd.my.id/usage</a></strong></p>
+        <p class="mb-0">The dashboard shows real-time usage statistics, model distribution, and recent requests. It requires a password to access (set via <code>DASHBOARD_PASS</code> environment variable).</p>
+      </div>
+    </div>
+  </div>
+</body></html>`;
+  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.end(html);
+}
+
 // ─── API endpoints ─────────────────────────────────────────────
 
 function handleAPI(method, url, res) {
@@ -610,6 +739,12 @@ const server = http.createServer((req, res) => {
     if (cookies.lite_sesh) sessions.delete(cookies.lite_sesh);
     res.writeHead(302, { Location: '/login' });
     return res.end();
+  }
+
+  // ─── Route: API Docs (authed) ───
+  if (path === '/docs' || path === '/docs/') {
+    if (!isAuthed(req)) { res.writeHead(302, { Location: '/login' }); return res.end(); }
+    return serveDocs(res);
   }
 
   // ─── Route: Dashboard (authed) ───
