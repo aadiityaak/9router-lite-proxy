@@ -113,6 +113,10 @@ function serveDashboard(res) {
 
   <div class="card">
     <h2>🕐 Recent</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <span></span>
+      <button class="ref" onclick="clearLog()">🗑️ Clear Log</button>
+    </div>
     <div class="table-wrap">
     <table><thead><tr><th>Time</th><th>Requested → Forced</th><th>Tokens In/Out</th><th>Status</th><th>Duration</th></tr></thead>
       <tbody id="recent-rows"><tr><td colspan="5" style="text-align:center;color:#8b949e">Loading...</td></tr></tbody>
@@ -143,6 +147,21 @@ async function load() {
 }
 load();
 setInterval(load,15000);
+
+async function clearLog() {
+  if (!confirm('Yakin mau clear semua log usage?')) return;
+  try {
+    const r = await fetch('/usage/api/clear', { method: 'DELETE' });
+    const d = await r.json();
+    if (d.success) {
+      load();
+    } else {
+      alert('Gagal: ' + (d.error || d.message));
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+}
 </script>
 </body></html>`;
   res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -215,6 +234,17 @@ function handleAPI(method, url, res) {
       sendJson(res, 200, Object.values(map));
     } catch (e) {
       sendJson(res, 200, []);
+    }
+    return;
+  }
+
+  // Clear log
+  if (p === '/usage/api/clear' && method === 'DELETE') {
+    try {
+      fs.writeFileSync(LOG_FILE, '', 'utf8');
+      sendJson(res, 200, { success: true, message: 'Log cleared' });
+    } catch (e) {
+      sendJson(res, 500, { error: 'Failed to clear log', message: e.message });
     }
     return;
   }
