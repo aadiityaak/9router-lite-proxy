@@ -6,12 +6,13 @@
  * - Forces model to "LITE" on every request
  * - Proxies to 9Router at http://127.0.0.1:20128
  * - Tracks usage in /home/ubuntu/lite-proxy/usage.log
- * - Serves dashboard at /usage
+ * - Serves dashboard at /usage (with cookie-based login)
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = 9099;
 const UPSTREAM_HOST = '127.0.0.1';
@@ -21,129 +22,214 @@ const UPSTREAM_TOKEN = process.env.UPSTREAM_TOKEN || (() => { throw new Error('M
 const FORCED_MODEL = 'LITE';
 const LOG_FILE = '/home/ubuntu/lite-proxy/usage.log';
 
-// ─── Helpers ───────────────────────────────────────────────────
+// ─── Dashboard Auth ─────────────────────────────────────────────
+const DASHBOARD_USER = 'dashboard';
+const DASHBOARD_PASS = process.env.DASHBOARD_PASS || 'jhdRZUM65hYevq9L';
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24h
+const sessions = new Map();
 
-function sendJson(res, status, data) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
+function parseCookies(hdr) {
+  const obj = {};
+  (hdr || '').split(';').forEach(c => {
+    const [k, ...v] = c.trim().split('=');
+    if (k) obj[k.trim()] = v.join('=').trim();
+  });
+  return obj;
 }
 
-// Clean conflicting headers for upstream responses
-function cleanHeaders(headers) {
-  const cleaned = { ...headers };
-  const hopByHop = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade'];
-  hopByHop.forEach(h => delete cleaned[h]);
-  if (cleaned['content-length'] && cleaned['transfer-encoding']) {
-    delete cleaned['transfer-encoding'];
+function setSessionCookie(res, token) {
+  res.setHeader('Set-Cookie', `lite_sesh=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}`);
+}
+
+function createSession() {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, Date.now());
+  return token;
+}
+
+function isAuthed(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const token = cookies.lite_sesh;
+  if (!token || !sessions.has(token)) return false;
+  // Extend session on activity
+  sessions.set(token, Date.now());
+  return true;
+}
+
+// Clean stale sessions every 10m
+setInterval(() => {
+  const cutoff = Date.now() - SESSION_TTL * 2;
+  for (const [k, v] of sessions) {
+    if (v < cutoff) sessions.delete(k);
   }
-  return cleaned;
-}
+}, 600000);
 
-// Filter /v1/models response
-function filterModelsOnly(body) {
-  try {
-    const data = JSON.parse(body);
-    if (data && data.object === 'list' && Array.isArray(data.data)) {
-      data.data = data.data.filter(m => m.id === FORCED_MODEL);
-    }
-    return JSON.stringify(data);
-  } catch {
-    return body;
-  }
-}
-
-// Log a usage entry
-function logUsage(entry) {
-  try {
-    fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
-  } catch (e) { /* ignore */ }
-}
-
-// ─── Dashboard HTML ────────────────────────────────────────────
-
-function serveDashboard(res) {
-  const html = `<!DOCTYPE html>
+const HTML_HEAD = (title) => `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LITE Proxy — Usage</title>
+  <title>${title}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <style>
-    * { margin:0; padding:0; box-sizing:border-box }
-    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; padding:20px; background:#0d1117; color:#c9d1d9 }
-    .w { max-width:1200px; margin:0 auto }
-    h1 { font-size:1.8em; color:#f0f6fc; margin-bottom:20px }
-    h2 { font-size:1.2em; color:#e6edf3; margin-bottom:10px }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-bottom:24px }
-    .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px }
-    .num { font-size:1.8em; font-weight:700; color:#58a6ff }
-    .lbl { color:#8b949e; font-size:.85em; margin-top:4px }
-    table { width:100%; border-collapse:collapse }
-    th,td { padding:8px 10px; text-align:left; border-bottom:1px solid #30363d; font-size:.9em }
-    th { position:sticky; top:0; background:#0d1117; color:#8b949e; font-weight:600 }
-    .ok { color:#3fb950 }
-    .err { color:#f85149 }
-    code { background:#21262d; padding:2px 6px; border-radius:4px; font-size:.85em }
-    .ref { position:fixed; top:20px; right:20px; background:#238636; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:.9em }
-    .ref:hover { background:#2ea043 }
+    body { background:#f8f9fa }
+    .stat-card { border-left:4px solid #0d6efd }
+    .stat-card .num { font-size:2rem; font-weight:700 }
     .table-wrap { max-height:400px; overflow-y:auto }
+    .bg-model { background:#e8f4f8; font-family:monospace; padding:2px 8px; border-radius:4px }
   </style>
-</head>
+</head>`;
+
+// ─── Login Page ─────────────────────────────────────────────────
+
+function serveLogin(res, error) {
+  const html = `${HTML_HEAD('Login — LITE Proxy')}
+<body class="d-flex align-items-center min-vh-100">
+  <div class="container" style="max-width:400px">
+    <div class="card shadow">
+      <div class="card-body p-4">
+        <div class="text-center mb-4">
+          <i class="bi bi-shield-lock fs-1 text-primary"></i>
+          <h4 class="mt-2">LITE Proxy Dashboard</h4>
+          <p class="text-muted small">Masukkan password untuk melanjutkan</p>
+        </div>
+        ${error ? `<div class="alert alert-danger py-2 small">${error}</div>` : ''}
+        <form method="POST" action="/login">
+          <div class="mb-3">
+            <label class="form-label">Password</label>
+            <input type="password" name="password" class="form-control" autofocus required>
+          </div>
+          <button type="submit" class="btn btn-primary w-100">Masuk</button>
+        </form>
+      </div>
+    </div>
+    <p class="text-center text-muted small mt-3">LITE Proxy &mdash; lite.wsd.my.id</p>
+  </div>
+</body></html>`;
+  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.end(html);
+}
+
+// ─── Dashboard HTML (Bootstrap 5) ───────────────────────────────
+
+function serveDashboard(res) {
+  const html = `${HTML_HEAD('Dashboard — LITE Proxy')}
 <body>
-<div class="w">
-  <button class="ref" onclick="location.reload()">🔄 Refresh</button>
-  <h1>🔒 LITE Proxy Usage</h1>
-  <p style="margin-bottom:20px;color:#8b949e">Endpoint <code>lite.wsd.my.id/v1</code></p>
+  <nav class="navbar navbar-dark bg-dark px-3">
+    <span class="navbar-brand mb-0 h1"><i class="bi bi-lightning-charge-fill text-warning"></i> LITE Proxy</span>
+    <div>
+      <span class="text-light me-3 small"><code class="text-light bg-secondary px-2 py-1 rounded">lite.wsd.my.id/v1</code></span>
+      <a href="/logout" class="btn btn-outline-light btn-sm"><i class="bi bi-box-arrow-right"></i> Logout</a>
+    </div>
+  </nav>
 
-  <div class="grid" id="stats">
-    <div class="card"><div class="num" id="total-req">—</div><div class="lbl">Total Requests</div></div>
-    <div class="card"><div class="num" id="today-req">—</div><div class="lbl">Today</div></div>
-    <div class="card"><div class="num" id="total-in">—</div><div class="lbl">Tokens In</div></div>
-    <div class="card"><div class="num" id="total-out">—</div><div class="lbl">Tokens Out</div></div>
-  </div>
+  <div class="container-fluid py-3 px-4">
+    <!-- Stat cards -->
+    <div class="row g-3 mb-4" id="stats">
+      <div class="col-md-3 col-6">
+        <div class="card stat-card h-100">
+          <div class="card-body">
+            <div class="num" id="total-req">—</div>
+            <div class="text-muted small">Total Requests</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3 col-6">
+        <div class="card stat-card h-100" style="border-left-color:#198754">
+          <div class="card-body">
+            <div class="num text-success" id="today-req">—</div>
+            <div class="text-muted small">Today</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3 col-6">
+        <div class="card stat-card h-100" style="border-left-color:#6f42c1">
+          <div class="card-body">
+            <div class="num text-primary" id="total-in">—</div>
+            <div class="text-muted small">Tokens In</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3 col-6">
+        <div class="card stat-card h-100" style="border-left-color:#fd7e14">
+          <div class="card-body">
+            <div class="num text-warning" id="total-out">—</div>
+            <div class="text-muted small">Tokens Out</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-  <div class="card" style="margin-bottom:16px">
-    <h2>📈 By Model</h2>
-    <div class="table-wrap">
-    <table><thead><tr><th>Model</th><th>Requests</th><th>Tokens In</th><th>Tokens Out</th></tr></thead>
-      <tbody id="model-rows"><tr><td colspan="4" style="text-align:center;color:#8b949e">Loading...</td></tr></tbody>
-    </table>
+    <div class="row g-3">
+      <!-- Models -->
+      <div class="col-md-5">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-boxes"></i> By Model</span>
+            <span class="badge bg-primary rounded-pill" id="model-count">0</span>
+          </div>
+          <div class="card-body p-0 table-wrap">
+            <table class="table table-sm table-hover mb-0">
+              <thead class="table-light"><tr><th>Model</th><th class="text-end">Req</th><th class="text-end">Tokens In</th><th class="text-end">Tokens Out</th></tr></thead>
+              <tbody id="model-rows"><tr><td colspan="4" class="text-center text-muted small py-3">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent -->
+      <div class="col-md-7">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-clock-history"></i> Recent</span>
+            <div>
+              <button class="btn btn-sm btn-outline-secondary me-1" onclick="window.location.reload()"><i class="bi bi-arrow-clockwise"></i></button>
+              <button class="btn btn-sm btn-outline-danger" onclick="clearLog()"><i class="bi bi-trash3"></i></button>
+            </div>
+          </div>
+          <div class="card-body p-0 table-wrap">
+            <table class="table table-sm table-hover mb-0">
+              <thead class="table-light"><tr><th>Time</th><th>Requested → Forced</th><th class="text-end">Tokens</th><th class="text-center">Status</th><th class="text-end">Duration</th></tr></thead>
+              <tbody id="recent-rows"><tr><td colspan="5" class="text-center text-muted small py-3">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>🕐 Recent</h2>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <span></span>
-      <button class="ref" onclick="clearLog()">🗑️ Clear Log</button>
-    </div>
-    <div class="table-wrap">
-    <table><thead><tr><th>Time</th><th>Requested → Forced</th><th>Tokens In/Out</th><th>Status</th><th>Duration</th></tr></thead>
-      <tbody id="recent-rows"><tr><td colspan="5" style="text-align:center;color:#8b949e">Loading...</td></tr></tbody>
-    </table>
-    </div>
-  </div>
-</div>
 <script>
 async function load() {
-  const [s, m, r] = await Promise.all([
-    fetch('/usage/api/stats').then(r=>r.json()),
-    fetch('/usage/api/models').then(r=>r.json()),
-    fetch('/usage/api/recent').then(r=>r.json())
-  ]);
-  if(s.error) { document.querySelector('#stats').innerHTML='<div class="card"><div class="lbl">'+s.error+'</div></div>'; return }
-  document.getElementById('total-req').textContent=s.total_requests;
-  document.getElementById('today-req').textContent=s.today_requests;
-  document.getElementById('total-in').textContent=s.total_tokens_in;
-  document.getElementById('total-out').textContent=s.total_tokens_out;
-
-  document.getElementById('model-rows').innerHTML=(m||[]).map(x=>
-    '<tr><td><code>'+x.model+'</code></td><td>'+x.requests+'</td><td>'+x.tokens_in+'</td><td>'+x.tokens_out+'</td></tr>'
-  ).join('');
-
-  document.getElementById('recent-rows').innerHTML=(r||[]).map(x=>
-    '<tr><td>'+new Date(x.timestamp).toLocaleString()+'</td><td><code>'+(x.requested_model||x.model||'')+'</code> &rarr; <code>LITE</code></td><td>'+(x.tokens_in||0)+' / '+(x.tokens_out||0)+'</td><td class="'+(x.status==200?'ok':'err')+'">'+x.status+'</td><td>'+(x.duration_ms||0)+'ms</td></tr>'
-  ).join('');
+  try {
+    const [s, m, r] = await Promise.all([
+      fetch('/usage/api/stats').then(r=>r.json()),
+      fetch('/usage/api/models').then(r=>r.json()),
+      fetch('/usage/api/recent').then(r=>r.json())
+    ]);
+    document.getElementById('total-req').textContent=s.total_requests;
+    document.getElementById('today-req').textContent=s.today_requests;
+    document.getElementById('total-in').textContent=s.total_tokens_in;
+    document.getElementById('total-out').textContent=s.total_tokens_out;
+    const mRows = document.getElementById('model-rows');
+    if (m && m.length) {
+      document.getElementById('model-count').textContent=m.length;
+      mRows.innerHTML=m.map(x=>'<tr><td><span class="bg-model">'+x.model+'</span></td><td class="text-end">'+x.requests+'</td><td class="text-end">'+x.tokens_in+'</td><td class="text-end">'+x.tokens_out+'</td></tr>').join('');
+    } else {
+      mRows.innerHTML='<tr><td colspan="4" class="text-center text-muted small py-3">No data</td></tr>';
+    }
+    const rRows = document.getElementById('recent-rows');
+    if (r && r.length) {
+      rRows.innerHTML=r.map(x=>{
+        const ts=new Date(x.timestamp).toLocaleString();
+        const reqM=x.requested_model||'—';
+        const cls=x.status>=200&&x.status<300?'text-success':'text-danger';
+        return '<tr><td class="small">'+ts+'</td><td><span class="bg-model">'+reqM+'</span> &rarr; <span class="bg-model">LITE</span></td><td class="text-end">'+(x.tokens_in||0)+' / '+(x.tokens_out||0)+'</td><td class="text-center"><span class="badge bg-'+cls+'">'+x.status+'</span></td><td class="text-end text-muted small">'+(x.duration_ms||0)+'ms</td></tr>'
+      }).join('');
+    } else {
+      rRows.innerHTML='<tr><td colspan="5" class="text-center text-muted small py-3">No data</td></tr>';
+    }
+  } catch(e) {}
 }
 load();
 setInterval(load,15000);
@@ -153,16 +239,11 @@ async function clearLog() {
   try {
     const r = await fetch('/usage/api/clear', { method: 'DELETE' });
     const d = await r.json();
-    if (d.success) {
-      load();
-    } else {
-      alert('Gagal: ' + (d.error || d.message));
-    }
-  } catch(e) {
-    alert('Error: ' + e.message);
-  }
+    if (d.success) load(); else alert('Gagal: '+(d.error||d.message));
+  } catch(e) { alert('Error: '+e.message); }
 }
 </script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body></html>`;
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(html);
@@ -171,29 +252,23 @@ async function clearLog() {
 // ─── API endpoints ─────────────────────────────────────────────
 
 function handleAPI(method, url, res) {
-  // Parse the path
   const p = url.pathname;
 
-  // Stats
   if (p === '/usage/api/stats' && method === 'GET') {
     try {
       const raw = fs.readFileSync(LOG_FILE, 'utf8');
       const lines = raw.split('\n').filter(l => l.trim());
       const today = new Date(); today.setHours(0,0,0,0);
       const stats = { total_requests: 0, today_requests: 0, total_tokens_in: 0, total_tokens_out: 0 };
-      
       lines.forEach(l => {
         try {
           const e = JSON.parse(l);
           stats.total_requests++;
           stats.total_tokens_in += e.tokens_in || 0;
           stats.total_tokens_out += e.tokens_out || 0;
-          if (new Date(e.timestamp) >= today) {
-            stats.today_requests++;
-          }
+          if (new Date(e.timestamp) >= today) stats.today_requests++;
         } catch(e2) {}
       });
-      
       sendJson(res, 200, stats);
     } catch (e) {
       sendJson(res, 200, { total_requests: 0, today_requests: 0, total_tokens_in: 0, total_tokens_out: 0 });
@@ -201,7 +276,6 @@ function handleAPI(method, url, res) {
     return;
   }
 
-  // Recent
   if (p === '/usage/api/recent' && method === 'GET') {
     try {
       const raw = fs.readFileSync(LOG_FILE, 'utf8');
@@ -215,7 +289,6 @@ function handleAPI(method, url, res) {
     return;
   }
 
-  // By model
   if (p === '/usage/api/models' && method === 'GET') {
     try {
       const raw = fs.readFileSync(LOG_FILE, 'utf8');
@@ -238,7 +311,6 @@ function handleAPI(method, url, res) {
     return;
   }
 
-  // Clear log
   if (p === '/usage/api/clear' && method === 'DELETE') {
     try {
       fs.writeFileSync(LOG_FILE, '', 'utf8');
@@ -249,8 +321,42 @@ function handleAPI(method, url, res) {
     return;
   }
 
-  // 404
   sendJson(res, 404, { error: 'Not found' });
+}
+
+// ─── Helpers ───────────────────────────────────────────────────
+
+function sendJson(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
+function cleanHeaders(headers) {
+  const cleaned = { ...headers };
+  const hopByHop = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade'];
+  hopByHop.forEach(h => delete cleaned[h]);
+  if (cleaned['content-length'] && cleaned['transfer-encoding']) {
+    delete cleaned['transfer-encoding'];
+  }
+  return cleaned;
+}
+
+function filterModelsOnly(body) {
+  try {
+    const data = JSON.parse(body);
+    if (data && data.object === 'list' && Array.isArray(data.data)) {
+      data.data = data.data.filter(m => m.id === FORCED_MODEL);
+    }
+    return JSON.stringify(data);
+  } catch {
+    return body;
+  }
+}
+
+function logUsage(entry) {
+  try {
+    fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
+  } catch (e) { /* ignore */ }
 }
 
 // ─── Main Proxy ────────────────────────────────────────────────
@@ -260,13 +366,52 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const path = url.pathname;
 
-  // ─── Route: Dashboard HTML ───
+  // ─── Route: Login page ───
+  if (path === '/login') {
+    if (method === 'GET') {
+      return serveLogin(res);
+    }
+    if (method === 'POST') {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => {
+        const params = new URLSearchParams(body);
+        const pass = params.get('password');
+        if (pass === DASHBOARD_PASS) {
+          const token = createSession();
+          setSessionCookie(res, token);
+          res.writeHead(302, { Location: '/usage' });
+          return res.end();
+        }
+        serveLogin(res, 'Password salah. Coba lagi.');
+      });
+      return;
+    }
+  }
+
+  // ─── Route: Logout ───
+  if (path === '/logout') {
+    const cookies = parseCookies(req.headers.cookie);
+    const token = cookies.lite_sesh;
+    if (token) sessions.delete(token);
+    res.writeHead(302, { Location: '/login' });
+    return res.end();
+  }
+
+  // ─── Route: Dashboard (authed) ───
   if (path === '/usage' || path === '/usage/') {
+    if (!isAuthed(req)) {
+      res.writeHead(302, { Location: '/login' });
+      return res.end();
+    }
     return serveDashboard(res);
   }
 
-  // ─── Route: API ───
+  // ─── Route: Dashboard API (authed) ───
   if (path.startsWith('/usage/api/')) {
+    if (!isAuthed(req)) {
+      return sendJson(res, 401, { error: 'Unauthorized' });
+    }
     return handleAPI(method, url, res);
   }
 
@@ -316,7 +461,6 @@ const server = http.createServer((req, res) => {
       options.headers['content-length'] = Buffer.byteLength(newBody);
 
       const upstreamReq = http.request(options, upstreamRes => {
-        // Log usage (collect token counts from response)
         let responseBody = '';
         upstreamRes.on('data', c => responseBody += c);
         upstreamRes.on('end', () => {
@@ -341,7 +485,6 @@ const server = http.createServer((req, res) => {
           });
         });
 
-        // Forward response
         res.writeHead(upstreamRes.statusCode, cleanHeaders(upstreamRes.headers));
         upstreamRes.pipe(res);
       });
@@ -379,7 +522,6 @@ const server = http.createServer((req, res) => {
 
   // ─── Everything else: passthrough ───
   const upstreamReq = http.request(options, upstreamRes => {
-    // Collect response for token tracking
     let responseBody = '';
     const isStreaming = (upstreamRes.headers['content-type'] || '').includes('text/event-stream');
     
